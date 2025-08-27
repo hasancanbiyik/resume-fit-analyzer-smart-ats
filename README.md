@@ -1,7 +1,8 @@
 # Resume Fit Analyzer / Smart ATS
 
 Smart ATS is a Streamlit-based application that evaluates how well a resume matches a given Job Description (JD).
-It combines ATS-style keyword extraction with semantic similarity powered by embeddings — all offline, free, and API-keyless.
+It combines ATS-style keyword extraction with semantic similarity powered by embeddings; all offline, free, and API-keyless.
+This way, one can compare their resume with the JD they plan to apply for to see whether it is a good match or not!
 
 ## Features
 
