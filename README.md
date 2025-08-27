@@ -88,3 +88,6 @@ Then:
 ## License
 
 MIT License © 2025
+
+## Tags
+#NLP #MachineLearning #Transformers #SemanticSearch #ATS #GenAI #Streamlit #Python #MLEngineering #ResumeOptimization
