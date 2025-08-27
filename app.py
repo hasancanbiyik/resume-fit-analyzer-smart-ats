@@ -1,4 +1,6 @@
 import streamlit as st
+import pandas as pd
+from datetime import datetime
 import PyPDF2 as pdf
 import re, string, json
 import numpy as np
@@ -202,6 +204,8 @@ if analyze:
         st.warning(", ".join(missing))
     else:
         st.success("No major missing skills detected.")
+
+        display_bullet_suggestions(missing, resume_text, model)
 
     # Download JSON report
     report = {
@@ -456,7 +460,7 @@ def display_bullet_suggestions(missing, resume_text, model):
         st.download_button(
             "📄 Download as Text File",
             data=bullet_text,
-            file_name=f"resume_bullets_{pd.Timestamp.now().strftime('%Y%m%d')}.txt",
+            file_name=f"resume_bullets_{datetime.now().strftime('%Y%m%d')}.txt",
             mime="text/plain",
             help="Download bullets as a text file for easy copy-paste"
         )
