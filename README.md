@@ -40,7 +40,7 @@ This way, one can compare their resume with the JD they plan to apply for to see
 Clone the repository and install dependencies:
 
 ```bash
-git clone https://github.com/<your-username>/smart-ats.git
+git clone https://github.com/hasancanbiyik/resume-fit-analyzer-smart-ats
 cd smart-ats
 
 python3 -m venv .venv
