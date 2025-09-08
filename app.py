@@ -1,24 +1,96 @@
+import os
 import streamlit as st
+import logging
+from typing import Optional, Tuple
 import pandas as pd
 from datetime import datetime
+import time
+import functools
 import PyPDF2 as pdf
 import re, string, json
 import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sentence_transformers import SentenceTransformer, util
+from html import escape
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Defaults
+DEFAULT_EMBED_MODEL = os.getenv("EMBED_MODEL", "all-MiniLM-L6-v2")
+DEFAULT_THRESHOLD = float(os.getenv("THRESHOLD", "0.68"))
+DEFAULT_TOP_K = int(os.getenv("TOP_K", "25"))
+DEFAULT_PORT = int(os.getenv("PORT", "8501"))
 
 # ------------------------------
-# Helpers: loading & text utils
+# Utility Functions
 # ------------------------------
-def input_pdf_text(uploaded_file) -> str:
+
+def sanitize_text_input(text: str, max_length: int = 50000) -> str:
+    """Sanitize and validate text input."""
+    if not text or not isinstance(text, str):
+        return ""
+    
+    # Limit length
+    text = text[:max_length]
+    
+    # Remove potentially harmful content
+    text = escape(text)  # HTML escape
+    
+    # Basic cleanup
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', text)  # Remove control chars
+    
+    return text.strip()
+
+def validate_file(uploaded_file) -> Tuple[bool, str]:
+    """Validate uploaded file before processing."""
+    if not uploaded_file:
+        return False, "No file uploaded"
+    
+    # Check file size (10MB limit)
+    if uploaded_file.size > 10 * 1024 * 1024:
+        return False, "File size exceeds 10MB limit"
+    
+    # Check file type
+    if not uploaded_file.name.lower().endswith('.pdf'):
+        return False, "Only PDF files are supported"
+    
+    return True, "Valid file"
+
+def input_pdf_text(uploaded_file) -> Tuple[str, Optional[str]]:
+    """Extract text from PDF with detailed error reporting."""
+    # Validate file first
+    is_valid, validation_message = validate_file(uploaded_file)
+    if not is_valid:
+        return "", validation_message
+    
     try:
         reader = pdf.PdfReader(uploaded_file)
+        if reader.is_encrypted:
+            return "", "Encrypted PDFs are not supported. Please upload an unencrypted version."
+        
         text = []
-        for i in range(len(reader.pages)):
-            text.append(reader.pages[i].extract_text() or "")
-        return "\n".join(text)
-    except Exception:
-        return ""
+        for page_num, page in enumerate(reader.pages):
+            try:
+                page_text = page.extract_text() or ""
+                text.append(page_text)
+            except Exception as e:
+                logger.warning(f"Failed to extract page {page_num}: {e}")
+                continue
+                
+        full_text = "\n".join(text)
+        if len(full_text.strip()) < 100:
+            return full_text, "Warning: Very little text was extracted. Please ensure your PDF contains readable text."
+        
+        return full_text, None
+        
+    except pdf.errors.PdfReadError as e:
+        logger.error(f"PDF read error: {e}")
+        return "", "Unable to read PDF file. It may be corrupted or in an unsupported format."
+    except Exception as e:
+        logger.error(f"Unexpected error processing PDF: {e}")
+        return "", "An unexpected error occurred while processing your PDF."
 
 def normalize(text: str) -> str:
     text = text.lower()
@@ -31,17 +103,45 @@ def split_sentences(text: str):
     parts = re.split(r"[.\n\r]+", text)
     return [p.strip() for p in parts if len(p.strip()) > 2]
 
-# ------------------------------
-# Model (cached once)
-# ------------------------------
-@st.cache_resource
-def load_embedder():
-    # small, fast, widely used
-    return SentenceTransformer("all-MiniLM-L6-v2")
+def monitor_performance(func_name: str):
+    """Decorator to monitor function performance."""
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = time.time()
+            try:
+                result = func(*args, **kwargs)
+                duration = time.time() - start_time
+                logger.info(f"{func_name} completed in {duration:.2f}s")
+                return result
+            except Exception as e:
+                duration = time.time() - start_time
+                logger.error(f"{func_name} failed after {duration:.2f}s: {e}")
+                raise
+        return wrapper
+    return decorator
 
 # ------------------------------
-# JD term extraction (ATS-style)
+# Model Loading
 # ------------------------------
+
+@st.cache_resource
+def load_embedder():
+    """Load embedding model with error handling and progress."""
+    try:
+        with st.spinner("Loading AI model (first time may take 30+ seconds)..."):
+            model = SentenceTransformer(DEFAULT_EMBED_MODEL)
+            logger.info(f"Successfully loaded model: {DEFAULT_EMBED_MODEL}")
+            return model
+    except Exception as e:
+        logger.error(f"Failed to load model {DEFAULT_EMBED_MODEL}: {e}")
+        st.error(f"Failed to load AI model. Please refresh the page or contact support.")
+        st.stop()
+
+# ------------------------------
+# Core Analysis Functions
+# ------------------------------
+
 def extract_top_keywords(jd_text: str, top_k: int = 20):
     # Use TF-IDF to find salient n-grams in the JD
     doc = jd_text if jd_text.strip() else ""
@@ -73,9 +173,6 @@ def extract_top_keywords(jd_text: str, top_k: int = 20):
                     expanded.add(p)
     return list(expanded)[:top_k]
 
-# ------------------------------
-# Hybrid coverage = Exact → Semantic
-# ------------------------------
 def _present(resume_norm: str, phrase: str) -> bool:
     if " " in phrase:
         return phrase in resume_norm
@@ -114,9 +211,7 @@ def semantic_coverage(resume_text: str, jd_terms, model: SentenceTransformer, th
     coverage_ratio = len(matched_terms) / max(len(jd_terms), 1)
     return float(coverage_ratio), matched_terms, missing_terms
 
-# ------------------------------
-# Sentence-level semantic similarity
-# ------------------------------
+@monitor_performance("semantic_analysis")
 def semantic_score(resume_text: str, jd_text: str, model: SentenceTransformer):
     # Embed JD sentences and Resume sentences, then average best-match per JD sentence
     jd_sents = split_sentences(jd_text) or [jd_text]
@@ -134,118 +229,9 @@ def semantic_score(resume_text: str, jd_text: str, model: SentenceTransformer):
     return score, per_jd_max.tolist()
 
 # ------------------------------
-# Streamlit UI
+# Bullet Generation Functions
 # ------------------------------
-st.set_page_config(page_title="Smart ATS (No API Key)", layout="wide")
-st.title("🧠 Smart ATS — No API Key Needed")
-st.caption("Embeddings (semantic) + ATS coverage (hybrid). 100% free, CPU-only.")
 
-col1, col2 = st.columns(2)
-with col1:
-    jd = st.text_area("Paste the Job Description", height=240, placeholder="Paste JD here...")
-with col2:
-    uploaded_file = st.file_uploader("Upload Your Resume (PDF)", type=["pdf"])
-    resume_text = ""
-    if uploaded_file is not None:
-        resume_text = input_pdf_text(uploaded_file)
-    else:
-        resume_text = st.text_area("…or paste resume text", height=240, placeholder="Paste resume text here...")
-
-threshold = st.slider("Semantic coverage threshold", 0.50, 0.85, 0.68, 0.01,
-                      help="Higher = stricter matching. Typical 0.65–0.75.")
-
-analyze = st.button("🔎 Analyze Fit")
-
-if analyze:
-    if not jd.strip():
-        st.error("Please provide the Job Description.")
-        st.stop()
-    if not resume_text.strip():
-        st.error("Please upload or paste your resume.")
-        st.stop()
-
-    with st.spinner("Loading model and scoring…"):
-        model = load_embedder()
-
-        # 1) Extract JD terms (ATS-style)
-        jd_keywords = extract_top_keywords(jd, top_k=25)
-
-        # 2) Exact coverage first
-        cov_exact, matched_exact, missing_exact = exact_coverage(resume_text, jd_keywords)
-
-        # 3) Semantic coverage on the remaining missing terms
-        cov_sem, matched_sem, missing_sem = semantic_coverage(resume_text, missing_exact, model, threshold=threshold)
-
-        # Combine matched/missing for final coverage
-        matched = matched_exact + matched_sem
-        missing = missing_sem
-        coverage_ratio = len(matched) / max(len(jd_keywords), 1)
-
-        # 4) Sentence-level semantic similarity (overall JD ↔ resume)
-        sem_ratio, jd_sentence_scores = semantic_score(resume_text, jd, model)
-
-        # Final score (0–100): balance meaning + keywords
-        final = 100.0 * (0.7 * sem_ratio + 0.3 * coverage_ratio)
-
-    st.subheader("📊 Match Score")
-    st.metric("Overall (0–100)", value=round(final, 1))
-    st.progress(min(max(int(final), 0), 100))
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Top JD Keywords (ATS-style)**")
-        st.write(", ".join(jd_keywords) if jd_keywords else "—")
-    with c2:
-        st.markdown("**Matched in Resume**")
-        st.write(", ".join(matched) if matched else "—")
-
-    st.markdown("**Missing / Underrepresented Skills**")
-    if missing:
-        st.warning(", ".join(missing))
-    else:
-        st.success("No major missing skills detected.")
-
-        display_bullet_suggestions(missing, resume_text, model)
-
-    # Download JSON report
-    report = {
-        "score": final,
-        "semantic_ratio": sem_ratio,
-        "coverage_ratio": coverage_ratio,
-        "jd_keywords": jd_keywords,
-        "matched_keywords": matched,
-        "missing_keywords": missing,
-        "debug": {
-            "jd_sentence_match_scores": jd_sentence_scores,
-            "resume_chars": len(resume_text),
-            "jd_chars": len(jd),
-            "threshold": threshold,
-            "cov_exact": cov_exact,
-            "cov_sem_on_missing": cov_sem
-        }
-    }
-    st.download_button(
-        "⬇️ Download JSON Report",
-        data=json.dumps(report, indent=2),
-        file_name="match_report.json",
-        mime="application/json"
-    )
-
-st.divider()
-with st.expander("How this works"):
-    st.write("""
-**Hybrid coverage**:
-1) We check **exact keyword/phrase hits** (precise, zero ambiguity).
-2) For remaining terms, we use **semantic embeddings** to see if any resume sentence means roughly the same thing (cosine ≥ threshold).
-
-**Semantic similarity**:
-- Independently, we compare every JD sentence to the best matching resume sentence and average these scores.
-
-**Final score**:
-- 70% sentence-level semantic similarity + 30% term coverage.
-    """)
-
-# ----- Enhanced Bullets: embedding-aware templates -----
 ACTION_VERBS = [
     "Developed", "Implemented", "Optimized", "Automated", "Designed",
     "Built", "Enhanced", "Led", "Streamlined", "Architected", 
@@ -261,7 +247,6 @@ IMPACT_TEMPLATES = [
     "delivering {value}% faster {process}"
 ]
 
-# More contextual metric/outcome mappings
 METRIC_MAPPINGS = {
     "data": ["accuracy", "processing speed", "data quality"],
     "machine learning": ["model performance", "prediction accuracy", "training efficiency"],
@@ -437,10 +422,9 @@ def suggest_bullets(missing_terms, resume_text, model, max_bullets=4):
     
     return bullets
 
-# Usage in Streamlit (add this where you want the bullets section)
 def display_bullet_suggestions(missing, resume_text, model):
     """Display the bullet suggestions section in Streamlit."""
-    st.subheader("✍️ Professional Resume Bullets")
+    st.subheader("✏️ Professional Resume Bullets")
     st.caption("AI-generated bullets based on missing skills and your experience context")
     
     if not missing:
@@ -477,5 +461,130 @@ def display_bullet_suggestions(missing, resume_text, model):
     else:
         st.info("Unable to generate contextual bullets. Consider adding more detailed experience descriptions to your resume.")
 
-# Add this to your main analysis section, after the missing skills display:
-# display_bullet_suggestions(missing, resume_text, model)
+# ------------------------------
+# Streamlit UI
+# ------------------------------
+st.set_page_config(page_title="Smart ATS (No API Key)", layout="wide")
+st.title("🧠 Smart ATS — No API Key Needed")
+st.caption("Embeddings (semantic) + ATS coverage (hybrid). 100% free, CPU-only.")
+
+col1, col2 = st.columns(2)
+with col1:
+    jd = st.text_area("Paste the Job Description", height=240, placeholder="Paste JD here...")
+    # Sanitize JD input
+    jd = sanitize_text_input(jd)
+
+with col2:
+    uploaded_file = st.file_uploader("Upload Your Resume (PDF)", type=["pdf"])
+    resume_text = ""
+    error_message = None
+    
+    if uploaded_file is not None:
+        resume_text, error_message = input_pdf_text(uploaded_file)
+        if error_message:
+            if "Warning:" in error_message:
+                st.warning(error_message)
+            else:
+                st.error(error_message)
+                resume_text = ""  # Clear text if there was an error
+    else:
+        resume_text = st.text_area("…or paste resume text", height=240, placeholder="Paste resume text here...")
+        resume_text = sanitize_text_input(resume_text)
+
+threshold = st.slider(
+    "Semantic coverage threshold",
+    0.50, 0.85, DEFAULT_THRESHOLD, 0.01,
+    help="Higher = stricter matching. Typical 0.65–0.75."
+)
+
+analyze = st.button("🔎 Analyze Fit")
+
+if analyze:
+    if not jd.strip():
+        st.error("Please provide the Job Description.")
+        st.stop()
+    if not resume_text.strip():
+        st.error("Please upload or paste your resume.")
+        st.stop()
+
+    with st.spinner("Loading model and scoring…"):
+        model = load_embedder()
+
+        # 1) Extract JD terms (ATS-style)
+        jd_keywords = extract_top_keywords(jd, top_k=DEFAULT_TOP_K)
+
+        # 2) Exact coverage first
+        cov_exact, matched_exact, missing_exact = exact_coverage(resume_text, jd_keywords)
+
+        # 3) Semantic coverage on the remaining missing terms
+        cov_sem, matched_sem, missing_sem = semantic_coverage(resume_text, missing_exact, model, threshold=threshold)
+
+        # Combine matched/missing for final coverage
+        matched = matched_exact + matched_sem
+        missing = missing_sem
+        coverage_ratio = len(matched) / max(len(jd_keywords), 1)
+
+        # 4) Sentence-level semantic similarity (overall JD ↔ resume)
+        sem_ratio, jd_sentence_scores = semantic_score(resume_text, jd, model)
+
+        # Final score (0–100): balance meaning + keywords
+        final = 100.0 * (0.7 * sem_ratio + 0.3 * coverage_ratio)
+
+    st.subheader("📊 Match Score")
+    st.metric("Overall (0–100)", value=round(final, 1))
+    st.progress(min(max(int(final), 0), 100))
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Top JD Keywords (ATS-style)**")
+        st.write(", ".join(jd_keywords) if jd_keywords else "—")
+    with c2:
+        st.markdown("**Matched in Resume**")
+        st.write(", ".join(matched) if matched else "—")
+
+    st.markdown("**Missing / Underrepresented Skills**")
+    if missing:
+        st.warning(", ".join(missing))
+        display_bullet_suggestions(missing, resume_text, model)
+    else:
+        st.success("No major missing skills detected.")
+        # Still show bullet suggestions even when no missing skills
+        display_bullet_suggestions(missing, resume_text, model)
+
+    # Download JSON report
+    report = {
+        "score": final,
+        "semantic_ratio": sem_ratio,
+        "coverage_ratio": coverage_ratio,
+        "jd_keywords": jd_keywords,
+        "matched_keywords": matched,
+        "missing_keywords": missing,
+        "debug": {
+            "jd_sentence_match_scores": jd_sentence_scores,
+            "resume_chars": len(resume_text),
+            "jd_chars": len(jd),
+            "threshold": threshold,
+            "cov_exact": cov_exact,
+            "cov_sem_on_missing": cov_sem
+        }
+    }
+    st.download_button(
+        "⬇️ Download JSON Report",
+        data=json.dumps(report, indent=2),
+        file_name="match_report.json",
+        mime="application/json"
+    )
+
+st.divider()
+with st.expander("How this works"):
+    st.write("""
+**Hybrid coverage**:
+1) We check **exact keyword/phrase hits** (precise, zero ambiguity).
+2) For remaining terms, we use **semantic embeddings** to see if any resume sentence means roughly the same thing (cosine ≥ threshold).
+
+**Semantic similarity**:
+- Independently, we compare every JD sentence to the best matching resume sentence and average these scores.
+
+**Final score**:
+- 70% sentence-level semantic similarity + 30% term coverage.
+    """)
