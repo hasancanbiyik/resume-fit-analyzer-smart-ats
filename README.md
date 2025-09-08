@@ -41,7 +41,7 @@ Clone the repository and install dependencies:
 
 ```bash
 git clone https://github.com/hasancanbiyik/resume-fit-analyzer-smart-ats
-cd smart-ats
+cd resume-fit-analyzer-smart-ats
 
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\Activate.ps1
