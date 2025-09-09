@@ -99,13 +99,11 @@ Then:
 
 ## Screenshots
 
-![Example 1: Insert JD and Upload Resume with Match Score - Low Scoring](resume-fit-analyzer-smart-ats/screenshots/example_1.png)
-![Example 2: Insert JD and Upload Resume with Match Score - High Scoring](resume-fit-analyzer-smart-ats/screenshots/example_2.png)
-![Example 1: Missing Words - Low Scoring](resume-fit-analyzer-smart-ats/screenshots/example_1_missing_words.png)
-![Example 2: Missing Words - High Scoring](resume-fit-analyzer-smart-ats/screenshots/example_2_missing_words.png)
-![Example 3: Bullet Points](resume-fit-analyzer-smart-ats/screenshots/example_3_professional_bullets.png)
-
-
+![Example 1: Insert JD and Upload Resume with Match Score](screenshots/example_1.png)
+![Example 2: Insert JD and Upload Resume with Match Score - High Scoring](screenshots/example_2.png)
+![Example 1: Missing Words - Low Scoring](screenshots/example_1_missing_words.png)
+![Example 2: Missing Words - High Scoring](screenshots/example_2_missing_words.png)
+![Example 3: Bullet Points](screenshots/example_3_professional_bullets.png)
 
 ---
 
