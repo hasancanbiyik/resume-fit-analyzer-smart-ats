@@ -19,17 +19,23 @@
 
 ---
 
-## Quickstart (3 commands)
+## Quickstart (5 commands)
 
 ```bash
-# 1) Create & activate a virtual env
+# 1) Clone the repository
+git clone https://github.com/hasancanbiyik/resume-fit-analyzer-smart-ats.git
+
+# 2) Navigate into the project directory
+cd resume-fit-analyzer-smart-ats
+
+# 3) Create & activate a virtual env
 python3 -m venv .venv && . .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
 
-# 2) Install deps
+# 4) Install deps
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# 3) Run the app
+# 5) Run the app
 PORT=8501 streamlit run app.py
 ```
 
